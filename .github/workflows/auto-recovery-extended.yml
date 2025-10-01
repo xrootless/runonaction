@@ -299,9 +299,8 @@ jobs:
         id: set_filename
         if: always()
         run: |
-          TS=$(date +"%Y-%m-%d_%H-%s")
-          FILENAME="workflow_${TS}.sql"
-          echo "filename=$FILENAME" >> "$GITHUB_OUTPUT"
+          timestamp=$(date +"%Y-%m-%d_%H-%M-%S")
+          echo "filename=backup_savebee_${timestamp}.sql" >> "$GITHUB_OUTPUT"
 
       - name: Trigger next recovery cycle
         uses: actions/github-script@v7
