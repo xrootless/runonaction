@@ -1,0 +1,339 @@
+# Secrets used (env: savebee-auto-recovery-public):
+# APP_HEALTHCHECK_URL=https://your-app-url/api/health
+# PRIVATE_REPO_TOKEN=your-github-token
+# PRIVATE_REPO_URL=your-github-username/your-private-repo
+# PRIVATE_REPO_REF=main
+# CYCLE_RUN_TIME_MINUTE=330 # 5.5 hours
+# APP_ENV_FILE=your-app-env-file-content
+
+name: SaveBee Auto Recovery Extended
+
+on:
+  workflow_dispatch:
+     inputs:
+       filename:
+         description: "R2 backup filename (leave empty to restore latest)"
+         type: string
+         required: false
+       keep:
+         description: "Keep downloaded file after restore"
+         type: boolean
+         required: false
+         default: false
+       cycle_number:
+         description: "Current cycle number (auto-incremented, don't set manually)"
+         type: number
+         required: false
+         default: 1000
+       backup_wait:
+         description: "Wait for the backup to be ready"
+         type: number
+         required: false
+         default: 30
+       monitor_mode:
+         description: "Run in monitoring mode (checks health every minute)"
+         type: boolean
+         required: true
+         default: true
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  health-monitor:
+    runs-on: ubuntu-latest
+    if: github.event.inputs.monitor_mode == 'true'
+    environment: savebee-auto-recovery-public
+    steps:
+      - name: Monitor server health for 60 minutes
+        shell: bash
+        env:
+          HEALTHCHECK_URL: ${{ secrets.APP_HEALTHCHECK_URL }}
+        run: |
+          set -euo pipefail
+          
+          if [ -z "${HEALTHCHECK_URL:-}" ]; then
+            echo "❌ APP_HEALTHCHECK_URL is not configured"
+            exit 1
+          fi
+          
+          echo "🔍 Starting 60-minute health monitoring for: $HEALTHCHECK_URL"
+          echo "Checking every minute until server is unhealthy or timeout..."
+          
+          start_time=$(date +%s)
+          end_time=$((start_time + 3600)) # 60 minutes
+          server_unhealthy=false
+          
+          while true; do
+            current_time=$(date +%s)
+            
+            # Check if 60 minutes has passed
+            if [ "$current_time" -ge "$end_time" ]; then
+              echo "⏰ 60 minutes elapsed, will trigger next monitoring cycle"
+              break
+            fi
+            
+            elapsed=$((current_time - start_time))
+            remaining=$((3600 - elapsed))
+            echo "---"
+            echo "⏰ $(date '+%Y-%m-%d %H:%M:%S') - Checking server health... (${remaining}s remaining)"
+            
+            # Try 3 times to confirm health status
+            failures=0
+            for attempt in 1 2 3; do
+              code=$(curl -s -o /dev/null -w "%{http_code}" "$HEALTHCHECK_URL" || echo "000")
+              echo "  Attempt $attempt/3: HTTP $code"
+              
+              if [ "$code" != "200" ]; then
+                failures=$((failures + 1))
+              else
+                # Successful response, no need to retry further
+                break
+              fi
+              
+              if [ "$attempt" -lt 3 ]; then sleep 2; fi
+            done
+            
+            if [ "$failures" -ge 2 ]; then
+              echo "❌ Server is unhealthy! ($failures/3 checks failed)"
+              echo "🚀 Will trigger recovery workflow..."
+              server_unhealthy=true
+              break
+            else
+              echo "✅ Server is healthy"
+              echo "⏳ Waiting 60 seconds before next check..."
+              sleep 60
+            fi
+          done
+          
+          # Set output for next step
+          if [ "$server_unhealthy" = true ]; then
+            echo "action=recovery" >> "$GITHUB_ENV"
+          else
+            echo "action=continue_monitoring" >> "$GITHUB_ENV"
+          fi
+
+      - name: Trigger recovery workflow
+        if: env.action == 'recovery'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            console.log('🚀 Triggering recovery workflow...');
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'auto-recovery-extended.yml',
+              ref: 'main',
+              inputs: {
+                filename: '${{ github.event.inputs.filename }}',
+                backup_wait: '${{ github.event.inputs.backup_wait }}',
+                keep: '${{ github.event.inputs.keep }}',
+                cycle_number: '${{ github.event.inputs.cycle_number }}',
+                monitor_mode: 'false'
+              }
+            });
+            console.log('✅ Recovery workflow triggered successfully');
+
+      - name: Trigger next monitoring cycle
+        if: env.action == 'continue_monitoring'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            console.log('🔄 Triggering next monitoring cycle...');
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'auto-recovery-extended.yml',
+              ref: 'main',
+              inputs: {
+                filename: '${{ github.event.inputs.filename }}',
+                backup_wait: '${{ github.event.inputs.backup_wait }}',
+                keep: '${{ github.event.inputs.keep }}',
+                cycle_number: '${{ github.event.inputs.cycle_number }}',
+                monitor_mode: 'true'
+              }
+            });
+            console.log('✅ Next monitoring cycle triggered');
+
+  restore-and-run:
+    runs-on: ubuntu-latest
+    if: github.event.inputs.monitor_mode != 'true'
+    environment: savebee-auto-recovery-public
+    env:
+      COMPOSE_FILE: php/docker-compose.yml
+      PRIVATE_REPO_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+      PRIVATE_REPO_URL: ${{ secrets.PRIVATE_REPO_URL }}
+      PRIVATE_REPO_REF: ${{ vars.PRIVATE_REPO_REF || 'main' }}
+      CYCLE_RUN_TIME_MINUTE: ${{ vars.CYCLE_RUN_TIME_MINUTE || 330 }} # 5.5 hours
+      CYCLE_NUMBER: ${{ github.event.inputs.cycle_number || 1000 }}
+      INPUT_BACKUP_WAIT: ${{ github.event.inputs.backup_wait || 30 }}
+      INPUT_FILENAME: ${{ github.event.inputs.filename }}
+    steps:
+      - name: Checkout private repository code
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.PRIVATE_REPO_URL }}
+          token: ${{ env.PRIVATE_REPO_TOKEN }}
+          ref: ${{ env.PRIVATE_REPO_REF || 'main' }}
+          path: private-code
+
+      - name: Copy private code to workspace
+        run: |
+          cp -r private-code/* .
+          rm -rf private-code
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Build app image with optimized caching
+      - name: Build application image (cached)
+        uses: docker/build-push-action@v6
+        with:
+          context: php
+          file: php/docker/Dockerfile
+          tags: savebee-app:cached
+          load: true
+          cache-from: type=gha,scope=savebee-app
+          cache-to: type=gha,mode=max,scope=savebee-app
+          provenance: false
+          build-args: |
+            USER_ID=${{ vars.USER_ID || 1000 }}
+            GROUP_ID=${{ vars.GROUP_ID || 1000 }}
+        env:
+          BUILDKIT_PROGRESS: plain
+
+      # Build cloudflared image with optimized caching
+      - name: Build cloudflared image (cached)
+        uses: docker/build-push-action@v6
+        with:
+          context: php
+          file: php/docker/cloudflared/Dockerfile
+          tags: savebee-cloudflared:cached
+          load: true
+          cache-from: type=gha,scope=savebee-cloudflared
+          cache-to: type=gha,mode=max,scope=savebee-cloudflared
+          provenance: false
+        env:
+          BUILDKIT_PROGRESS: plain
+
+      # Pull stable images that don't need building
+      - name: Pull stable images
+        run: |
+          docker pull nginx:alpine >/dev/null 2>&1
+          docker pull postgres:17.6-alpine >/dev/null 2>&1
+          docker pull redis:8.2-alpine >/dev/null 2>&1
+
+      - name: Write .env from environment secret
+        working-directory: php
+        env:
+          APP_ENV_FILE: ${{ secrets.APP_ENV_FILE }}
+        run: |
+          printf "%s" "${APP_ENV_FILE}" > .env
+          echo 'DB_HOST=db' >> .env
+
+      # Override docker-compose to use pre-built images
+      - name: Configure docker-compose to use cached images
+        working-directory: php
+        run: |
+          cat > docker-compose.override.yml << 'EOF'
+          services:
+            app:
+              image: savebee-app:cached
+              build: null
+            
+            cloudflared:
+              image: savebee-cloudflared:cached
+              build: null
+          EOF
+
+      - name: Start Docker Compose services
+        run: |
+          docker compose --env-file php/.env -f "$COMPOSE_FILE" up -d >/dev/null 2>&1
+
+      - name: Wait for services to be ready
+        run: |
+          for i in {1..60}; do
+            db_healthy=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' savebee-db 2>/dev/null || echo "none")
+            
+            if [ "$db_healthy" = "healthy" ]; then
+              if docker compose -f "$COMPOSE_FILE" exec -T app php artisan --version >/dev/null 2>&1; then
+                break
+              fi
+            fi
+            
+            if [ $i -eq 60 ]; then
+              exit 1
+            fi
+            
+            sleep 1
+          done
+
+      - name: Run backup:restore command (if filename exists)
+        env:
+          RESTORE_FILENAME: ${{ github.event.inputs.filename }}
+          INPUT_BACKUP_WAIT: ${{ github.event.inputs.backup_wait }}
+          INPUT_KEEP: ${{ github.event.inputs.keep }}
+        run: |
+          CMD="php artisan backup:restore"
+          if [ -n "$RESTORE_FILENAME" ]; then
+            CMD="$CMD \"$RESTORE_FILENAME\""
+          fi
+          if [ "$INPUT_KEEP" = "true" ]; then
+            CMD="$CMD --keep"
+          fi
+          if [ "$INPUT_BACKUP_WAIT" -gt 0 ]; then
+            CMD="$CMD --wait $INPUT_BACKUP_WAIT"
+          fi
+          docker compose -f "$COMPOSE_FILE" exec -T app bash -lc "$CMD" >/dev/null 2>&1 || true
+
+      - name: Run application for 5.5 hours
+        timeout-minutes: 360
+        continue-on-error: true
+        run: |
+          sleep $((60 * ${CYCLE_RUN_TIME_MINUTE:-330}))
+
+      - name: Set filename
+        id: set_filename
+        if: always()
+        run: |
+          TS=$(date +"%Y-%m-%d_%H-%s")
+          FILENAME="workflow_${TS}.sql"
+          echo "filename=$FILENAME" >> "$GITHUB_OUTPUT"
+
+      - name: Trigger next recovery cycle
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const nextCycle = ${{ env.CYCLE_NUMBER }} + 1;
+            console.log(`🔄 Triggering next recovery cycle: ${nextCycle}`);
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'auto-recovery-extended.yml',
+              ref: 'main',
+              inputs: {
+                filename: '${{ steps.set_filename.outputs.filename }}',
+                backup_wait: '${{ github.event.inputs.backup_wait }}',
+                keep: '${{ github.event.inputs.keep }}',
+                cycle_number: nextCycle.toString(),
+                monitor_mode: 'false'
+              }
+            });
+
+      - name: Create scheduled backup
+        if: always()
+        run: |
+          if docker compose -f "$COMPOSE_FILE" ps 2>/dev/null | grep -q "savebee-app"; then
+            docker compose -f "$COMPOSE_FILE" exec -T app php artisan backup:scheduled --force --filename="${{ steps.set_filename.outputs.filename }}" >/dev/null 2>&1
+          fi
+
+      - name: Cleanup
+        if: always()
+        run: |
+          docker compose -f "$COMPOSE_FILE" down -v >/dev/null 2>&1 || true
+          rm -f php/.env php/docker-compose.override.yml 2>/dev/null || true
