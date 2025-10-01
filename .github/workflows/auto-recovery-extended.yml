@@ -24,7 +24,7 @@ on:
          description: "Current cycle number (auto-incremented, don't set manually)"
          type: number
          required: false
-         default: 1000
+         default: 1
        backup_wait:
          description: "Wait for the backup to be ready"
          type: number
@@ -168,7 +168,7 @@ jobs:
       PRIVATE_REPO_URL: ${{ secrets.PRIVATE_REPO_URL }}
       PRIVATE_REPO_REF: ${{ vars.PRIVATE_REPO_REF || 'main' }}
       CYCLE_RUN_TIME_MINUTE: ${{ vars.CYCLE_RUN_TIME_MINUTE || 330 }} # 5.5 hours
-      CYCLE_NUMBER: ${{ github.event.inputs.cycle_number || 1000 }}
+      CYCLE_NUMBER: ${{ github.event.inputs.cycle_number || 1 }}
       INPUT_BACKUP_WAIT: ${{ github.event.inputs.backup_wait || 30 }}
       INPUT_FILENAME: ${{ github.event.inputs.filename }}
     steps:
