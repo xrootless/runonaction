@@ -5,7 +5,7 @@
 # PRIVATE_REPO_REF=main
 # CYCLE_RUN_TIME_MINUTE=330 # 5.5 hours
 # APP_ENV_FILE=your-app-env-file-content
-# Must include: TELEGRAM_BOT_TOKEN=xxx and ADMIN_TELEGRAM_ID=xxx for notifications
+#   Must include: TELEGRAM_BOT_TOKEN=xxx and ADMIN_TELEGRAM_ID=xxx for notifications
 
 name: SaveBee Auto Recovery Extended
 
@@ -199,12 +199,14 @@ jobs:
           load: true
           cache-from: type=gha,scope=savebee-app
           cache-to: type=gha,mode=max,scope=savebee-app
+          outputs: type=docker
           provenance: false
           build-args: |
             USER_ID=${{ vars.USER_ID || 1000 }}
             GROUP_ID=${{ vars.GROUP_ID || 1000 }}
         env:
           BUILDKIT_PROGRESS: plain
+          ACTIONS_STEP_DEBUG: false
 
       # Build cloudflared image with optimized caching
       - name: Build cloudflared image (cached)
@@ -216,9 +218,11 @@ jobs:
           load: true
           cache-from: type=gha,scope=savebee-cloudflared
           cache-to: type=gha,mode=max,scope=savebee-cloudflared
+          outputs: type=docker
           provenance: false
         env:
           BUILDKIT_PROGRESS: plain
+          ACTIONS_STEP_DEBUG: false
 
       # Pull stable images that don't need building
       - name: Pull stable images
